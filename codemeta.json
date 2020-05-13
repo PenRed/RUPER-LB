@@ -1,0 +1,38 @@
+{
+    "@context": "https://doi.org/10.5063/schema/codemeta-2.0",
+    "@type": "SoftwareSourceCode",
+    "license": "https://spdx.org/licenses/GPL-3.0-or-later",
+    "codeRepository": "git+https://github.com/PenRed/RUPER-LB.git",
+    "dateCreated": "2020-04-01",
+    "datePublished": "2020-05-13",
+    "dateModified": "2020-05-13",
+    "issueTracker": "https://github.com/PenRed/RUPER-LB/issues",
+    "name": "RUPER-LB",
+    "version": "1.0.0",
+    "description": "Load balance library for loosely-coupled iterative parallel applications that runs on infrastructures with disparate computing capabilities",
+    "keywords": [
+        "Load Balance",
+        "multi-threading",
+        "MPI"
+    ],
+    "programmingLanguage": [
+        "C++"
+    ],
+    "operatingSystem": [
+        "Linux",
+        "Windows"
+    ],
+    "author": [
+        {
+            "@type": "Person",
+            "@id": "https://orcid.org/0000-0003-1646-6094",
+            "givenName": "Vicent",
+            "familyName": "Giménez Alventosa",
+            "email": "vicent.gimenez.alventosa@gmail.com",
+            "affiliation": {
+                "@type": "Organization",
+                "name": "Instituto de Instrumentación para Imagen Molecular (I3M) Centro mixto CSIC - Universitat Politècnica de València"
+            }
+        }
+    ]
+}
