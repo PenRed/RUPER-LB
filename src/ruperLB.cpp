@@ -1,4 +1,3 @@
-
 //
 //
 //    Copyright (C) 2020 Universitat Politècnica de València - UPV
@@ -21,7 +20,7 @@
 //
 //    contact emails:
 //
-//        vicent.gimenez.alventosa@gmail.com
+//        vicent.gimenez.alventosa@gmail.com (Vicent Giménez Alventosa)
 //
 
 #include "ruperLB.hh"
@@ -87,12 +86,10 @@ float LB::worker::addMeasure(const std::chrono::steady_clock::time_point& actual
   }
 
   //Calculate elapsed time since previous iteration update
-  std::chrono::seconds::rep elapsedTime = std::chrono::duration_cast<
-    std::chrono::seconds>(actualTime-lastTime).count();
+  std::chrono::seconds::rep elapsedTime = elapsed(actualTime);
 
   //Calculate elapsed time since task beginning
-  std::chrono::seconds::rep measureStamp = std::chrono::duration_cast<
-    std::chrono::seconds>(actualTime-init).count();
+  std::chrono::seconds::rep measureStamp = timeStamp(actualTime);
       
   if(elapsedTime <= 0){
     //Insufficient elapsed time
@@ -143,7 +140,7 @@ int LB::worker::start(const std::chrono::steady_clock::time_point& initIn,
   //Set init timestamp
   init = initIn;
   //Set last report timestamp to allow adding the first measure
-  lastTime = init;
+  lastTime = init-std::chrono::seconds(2);
 
   //Initialize iterations done
   iterDone = 0;
@@ -151,7 +148,7 @@ int LB::worker::start(const std::chrono::steady_clock::time_point& initIn,
   assigned = nIter;
   
   //Register the first dummy measure on worker start
-  addMeasure(0); //Elapsed time = 0, iterations done = 0
+  addMeasure(init,0); //iterations done at worker init = 0
 
   return LB_SUCCESS;
 }
@@ -160,8 +157,7 @@ void LB::worker::end() {
   //Calculate elapsed time since previous iteration update
   const auto actualTime = std::chrono::steady_clock::now();
   //Add a final measure with the same speed of the last report
-  std::chrono::seconds::rep measureStamp = std::chrono::duration_cast<
-    std::chrono::seconds>(actualTime-init).count();
+  std::chrono::seconds::rep measureStamp = timeStamp(actualTime);
   measures.push_back(LB::measure(measureStamp,speed()));
   finished = true;
 }
@@ -175,8 +171,7 @@ unsigned long long LB::worker::predDone(std::chrono::steady_clock::time_point no
     return iterDone;
 	    
   //Calculate elapsed time since previous report
-  std::chrono::seconds::rep timeInterval = std::chrono::duration_cast<
-    std::chrono::seconds>(now-lastTime).count();
+  std::chrono::seconds::rep timeInterval = elapsed(now);
 
   //Calculate non registered time contribution
   double doneSinceUpdate = measures.back().speed*timeInterval;
@@ -184,16 +179,77 @@ unsigned long long LB::worker::predDone(std::chrono::steady_clock::time_point no
   return iterDone+static_cast<unsigned long long>(doneSinceUpdate);
 }
 
-int LB::worker::printReport(FILE* fout) const{
+int LB::worker::printReport(FILE* fout,
+			    const std::chrono::steady_clock::time_point globStart) const{
   if(fout == nullptr)
     return LB_ERROR_NULL_POINTER;
 
+  //Calculate elapsed time between global and worker starts
+  std::chrono::seconds::rep startDiff = std::chrono::duration_cast<
+    std::chrono::seconds>(init-globStart).count();
+  
   fprintf(fout,"# timestamp (s) | speed (iter/s)\n");  
   for(const auto& measure: measures){
     long long int timestamp =
+      static_cast<long long int>(measure.timestamp+startDiff);
+    fprintf(fout," %15lld   %10.4f\n",timestamp,measure.speed);
+  }
+  return LB_SUCCESS;
+}
+
+int LB::worker::dump(FILE* fdump) const{
+  if(fdump == nullptr)
+    return LB_ERROR_NULL_POINTER;
+
+  //Calculate seconds from init until lastTime
+  std::chrono::seconds::rep timeInterval = std::chrono::duration_cast<
+    std::chrono::seconds>(lastTime-init).count();
+
+  //Print worker state
+  fprintf(fdump,"%llu %d %d %llu %lld %lu\n",
+	  assigned,started,finished,iterDone,
+	  static_cast<long long int>(timeInterval),
+	  static_cast<unsigned long>(measures.size()));  
+
+  //Print worker measures
+  for(const auto& measure: measures){
+    long long int timestamp =
       static_cast<long long int>(measure.timestamp);
-    fprintf(fout," %15lld   %10.3f\n",timestamp,measure.speed);
-  }  
+    fprintf(fdump," %lld  %10.8E\n",timestamp,measure.speed);
+  }
+  return LB_SUCCESS;
+}
+
+int LB::worker::load(FILE* fin,
+		     const std::chrono::steady_clock::time_point taskBegin){
+  if(fin == nullptr)
+    return LB_ERROR_NULL_POINTER;
+
+  reset();
+
+  //Save initial time point
+  init = taskBegin;
+
+  //Read worker state
+  unsigned long nmeasures = 0;
+  long long int timeInterval;
+  int istarted, ifinished;
+  fscanf(fin," %llu %d %d %llu %lld %lu ",
+	 &assigned,&istarted,&ifinished,&iterDone,
+	 &timeInterval,&nmeasures);
+  started = istarted;
+  finished = ifinished;
+  //Calculate last time
+  lastTime = init + std::chrono::seconds(timeInterval);
+  
+  for(unsigned long i = 0; i < nmeasures; ++i){
+    long long int timestamp;
+    float speed;
+    fscanf(fin," %lld %f ",&timestamp,&speed);
+    measures.push_back(LB::measure(static_cast<std::chrono::seconds::rep>
+				   (timestamp),speed));
+  }
+  
   return LB_SUCCESS;
 }
 
@@ -216,12 +272,10 @@ float LB::guessWorker::addMeasure(const std::chrono::steady_clock::time_point& a
   }
 
   //Calculate elapsed time since previous iteration update
-  std::chrono::seconds::rep elapsedTime = std::chrono::duration_cast<
-    std::chrono::seconds>(actualTime-lastTime).count();
+  std::chrono::seconds::rep elapsedTime = elapsed(actualTime);
 
   //Calculate elapsed time since task beginning
-  std::chrono::seconds::rep measureStamp = std::chrono::duration_cast<
-    std::chrono::seconds>(actualTime-init).count();
+  std::chrono::seconds::rep measureStamp = timeStamp(actualTime);
 
   if(elapsedTime <= 0){
     //Insufficient elapsed time
@@ -270,6 +324,442 @@ float LB::guessWorker::addMeasure(const std::chrono::steady_clock::time_point& a
 // *** load balance task class *** 
 //
 
+int LB::task::parseAssigned(const std::string& response,
+			    unsigned long long& newAssign,
+			    int& errCode){
+  //Extract error flag from the response
+  int flag;
+  errCode = LB_SUCCESS;
+  int nread = sscanf(response.c_str(),"%d",&flag);
+  if(nread != 1){
+    return LB_ERROR_UNEXPECTED_FORMAT;    
+  }
+
+  if(flag != 0){
+    //Error, get error code
+    nread = sscanf(response.c_str(),"%*d %d",&errCode);
+    if(nread != 1){
+      return LB_ERROR_UNEXPECTED_FORMAT;    
+    }
+    return LB_REMOTE_ERROR;
+  }
+
+  //Success, get assigned iterations
+  nread = sscanf(response.c_str(),"%*d %*s %llu",
+		 &newAssign);
+  if(nread != 1){
+    return LB_ERROR_UNEXPECTED_FORMAT;    
+  }
+
+  return LB_SUCCESS;
+}
+
+// ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+
+static size_t curlCallback(char* ptr,
+			   size_t size,
+			   size_t nmemb,
+			   void* userdata){
+  static_cast<std::string*>(userdata)->append(ptr,nmemb);
+  return size*nmemb;
+}
+
+int LB::task::httpGet(const std::string& url,
+		      std::string& bodyResponse){
+
+  //Check if MPI is enabled
+  FILE* flog = fth;
+  bool blockWrite = true;
+#ifdef _PEN_USE_MPI_
+  int rank;
+  MPI_Comm_rank(comm, &rank);
+  if(rank != 0)
+    return LB_ERROR_MPI_RANK_0_EXPECTED;
+  flog = fMPI;
+  blockWrite = false;
+#endif
+  
+  CURL *curl;
+  CURLcode res;
+  //Init curl client
+  curl = curl_easy_init();
+  //Check curl status
+  if(curl) {
+
+    if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+    fprintf(flog,"%07ld s - LB::task::httpGet: "
+	    "Send GET petition: %s\n",
+	    static_cast<long int>(timeStamp()),url.c_str());
+    fflush(flog);
+	
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+
+    //Create write callback function
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,curlCallback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, static_cast<void*>(&bodyResponse));
+    
+    //Perform the request
+    res = curl_easy_perform(curl);
+    if(res != CURLE_OK){
+      if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+      fprintf(flog,"%07ld s - LB::task::httpGet: "
+	      "Petition failed: %s\n",
+	      static_cast<long int>(timeStamp()),curl_easy_strerror(res));
+      fflush(flog);
+      return LB_CURL_ERROR;
+    }
+
+    //Clean up
+    curl_easy_cleanup(curl);
+
+    //Print the response
+    if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+    fprintf(flog,"%07ld s - LB::task::httpGet: "
+	    "Response received: %s\n",
+	    static_cast<long int>(timeStamp()),bodyResponse.c_str());
+    fflush(flog);
+	
+    return LB_SUCCESS;
+  }
+  else{
+    if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+    fprintf(flog,"%07ld s - LB::task::httpGet: "
+	    "Error Unable to init curl\n",
+	    static_cast<long int>(timeStamp()));
+    fflush(flog);
+    return LB_CURL_ERROR;
+  }
+}
+
+int LB::task::extStartHTTP(int& serverErr,
+			   const unsigned verbose,
+			   bool trusted){
+  //Check if MPI is enabled
+  FILE* flog = fth;
+  bool blockWrite = true;
+#ifdef _PEN_USE_MPI_
+  (void)trusted; //Avoid unused warning
+  int rank;
+  MPI_Comm_rank(comm, &rank);
+  if(rank != 0)
+    return LB_ERROR_MPI_RANK_0_EXPECTED;
+  flog = fMPI;
+  blockWrite = false;
+#endif
+
+  
+  //Create parameters sufix
+  char sufix[600];
+  snprintf(sufix,600,"?worker=%ld&dt=%ld",
+	   ext_iworker,static_cast<long int>(timeStamp()));
+	
+  //Set URL
+  std::string url(startURL);
+  url.append(sufix);
+
+  //Send request
+  std::string response;
+  int ret = httpGet(url,response);
+  if(ret != LB_SUCCESS){
+    return ret;
+  }
+  
+  // Process the response
+  //**********************
+  response = pen_tcp::trim(response);  
+  unsigned long long ext_assigned;
+  int errParse = parseAssigned(response,ext_assigned,serverErr);
+  if(errParse != LB_SUCCESS){
+    if(errParse == LB_ERROR_UNEXPECTED_FORMAT){
+      if(verbose > 0){
+	if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+	fprintf(flog,"%07ld s - LB::task::extStartHTTP: Error: Unexpected "
+		"response format\n",
+		static_cast<long int>(timeStamp()));
+	fflush(flog);
+      }
+    }
+    return errParse;
+  }
+
+  // Update assignation
+  //********************
+#ifdef _PEN_USE_MPI_
+  setIterationsMPI(ext_assigned);
+#else
+  if(trusted)
+    setIterationsTrusted(ext_assigned);
+  else
+    setIterations(ext_assigned);
+#endif
+
+  if(verbose > 1){
+    if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+    fprintf(flog,"%07ld s - LB::task::extStartHTTP: Updated iterations "
+	    "to: %llu\n",
+	    static_cast<long int>(timeStamp()),ext_assigned);
+    fflush(flog);
+  }
+  
+  return LB_SUCCESS;  
+}
+
+int LB::task::extReportHTTP(int& serverErr,
+			    const unsigned long long nIter,
+			    const std::chrono::steady_clock::time_point& rep_time,
+			    const unsigned verbose,
+			    bool trusted){
+  //Check if MPI is enabled
+  FILE* flog = fth;
+  bool blockWrite = true;
+#ifdef _PEN_USE_MPI_
+  (void)trusted; //Avoid unused warning
+  int rank;
+  MPI_Comm_rank(comm, &rank);
+  if(rank != 0)
+    return LB_ERROR_MPI_RANK_0_EXPECTED;
+  flog = fMPI;
+  blockWrite = false;
+#endif
+  
+  //Get elapsed time since task init
+  long int sinceStart = static_cast<long int>(timeStamp(rep_time));
+  
+  //Create parameters sufix
+  char sufix[600];
+  snprintf(sufix,600,"?worker=%ld&nIter=%llu&dt=%ld",
+	   ext_iworker,nIter,sinceStart);
+	
+  //Set URL
+  std::string url(reportURL);
+  url.append(sufix);
+
+  //Send request
+  std::string response;
+  int ret = httpGet(url,response);
+  if(ret != LB_SUCCESS){
+    return ret;
+  }
+  
+  // Process the response
+  //**********************
+  response = pen_tcp::trim(response);  
+  unsigned long long ext_assigned;
+  int errParse = parseAssigned(response,ext_assigned,serverErr);
+  if(errParse != LB_SUCCESS){
+    if(errParse == LB_ERROR_UNEXPECTED_FORMAT){
+      if(verbose > 0){
+	if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+	fprintf(flog,"%07ld s - LB::task::extReportHTTP: Error: Unexpected "
+		"response format\n",
+		static_cast<long int>(timeStamp()));
+	fflush(flog);
+      }
+    }
+    return errParse;
+  }
+
+  // Update assignation
+  //********************
+#ifdef _PEN_USE_MPI_
+  setIterationsMPI(ext_assigned);
+#else
+  if(trusted)
+    setIterationsTrusted(ext_assigned);
+  else
+    setIterations(ext_assigned);
+#endif
+
+  if(verbose > 1){
+    if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+    fprintf(flog,"%07ld s - LB::task::extReportHTTP: Updated iterations "
+	    "to: %llu\n",
+	    static_cast<long int>(timeStamp()),ext_assigned);
+    fflush(flog);
+  }
+  
+  return LB_SUCCESS;  
+}
+
+int LB::task::extFinishHTTP(int& serverErr,
+			    const unsigned long long nIter,
+			    const std::chrono::steady_clock::time_point& rep_time,
+			    const unsigned verbose){
+  //Check if MPI is enabled
+  FILE* flog = fth;
+  bool blockWrite = true;
+#ifdef _PEN_USE_MPI_
+  int rank;
+  MPI_Comm_rank(comm, &rank);
+  if(rank != 0)
+    return LB_ERROR_MPI_RANK_0_EXPECTED;
+  flog = fMPI;
+  blockWrite = false;
+#endif
+  
+  //Get elapsed time since task init
+  long int sinceStart = static_cast<long int>(timeStamp(rep_time));
+  
+  //Create parameters sufix
+  char sufix[600];
+  snprintf(sufix,600,"?worker=%ld&nIter=%llu&dt=%ld",
+	   ext_iworker,nIter,sinceStart);
+	
+  //Set URL
+  std::string url(finishURL);
+  url.append(sufix);
+
+  //Send request
+  std::string response;
+  int ret = httpGet(url,response);
+  if(ret != LB_SUCCESS){
+    return ret;
+  }
+  
+  // Process the response
+  //**********************
+  response = pen_tcp::trim(response);  
+
+  //Extract error flag from the response
+  int flag;
+  int nread = sscanf(response.c_str(),"%d",&flag);
+  if(nread != 1){
+    if(verbose > 0){
+      if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+      fprintf(flog,"%07ld s - LB::task::extFinishHTTP: Error: Unexpected "
+	      "response format\n",
+	      static_cast<long int>(timeStamp()));
+      fflush(flog);
+    }
+    return LB_ERROR_UNEXPECTED_FORMAT;    
+  }
+
+  if(flag != 0){
+    nread = sscanf(response.c_str(),"%*d %d",&serverErr);
+    if(nread != 1){
+      if(verbose > 0){
+	if(blockWrite) const std::lock_guard<std::mutex> lockTh(mtxfth);
+	fprintf(flog,"%07ld s - LB::task::extFinishHTTP: Error: Unexpected "
+		"response format\n",
+		static_cast<long int>(timeStamp()));
+	fflush(flog);
+      }
+      return LB_ERROR_UNEXPECTED_FORMAT;    
+    }
+    return LB_REMOTE_ERROR;
+  }
+  
+  return LB_SUCCESS;  
+}
+
+#endif
+// **********************   HTTP END   **********************
+
+void LB::task::extStartHandler(const unsigned retries,
+			       std::chrono::seconds sleeptime,
+			       const unsigned verbose,
+			       const bool trusted){
+  //Check if external balance has been configured
+  if(ext_balance){
+
+    // ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+    // HTTP
+    //*******
+    if(ext_http){
+      for(unsigned i = 0; i < retries; ++i){
+	int serverErr;
+	int ret = extStartHTTP(serverErr,verbose,trusted);
+	if(ret == LB_SUCCESS || ret == LB_ERROR_MPI_RANK_0_EXPECTED)
+	  break;
+	
+	std::this_thread::sleep_for(sleeptime);	
+      }
+      return;
+    }
+#endif
+    // **********************   HTTP END   **********************
+    
+  }
+}
+
+void LB::task::extReportHandler(const unsigned long long nIterDone,
+				const std::chrono::steady_clock::time_point& rep_time,
+				const std::chrono::seconds sleeptime,
+				const unsigned verbose,
+				const bool trusted){
+  if(ext_balance){
+
+    // ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+    // HTTP
+    //*******
+    if(ext_http){
+      int serverErr;
+      int errRep = extReportHTTP(serverErr,nIterDone,rep_time,verbose,trusted);
+      if(errRep != LB_SUCCESS){
+	if(errRep != LB_REMOTE_ERROR){
+	  //Connection error, try again
+	  std::this_thread::sleep_for(sleeptime);	
+	  errRep = extReportHTTP(serverErr,nIterDone,rep_time,verbose,trusted);
+	  if(errRep == LB_SUCCESS)
+	    return;
+	}
+
+	if(errRep == LB_REMOTE_ERROR &&
+	   (serverErr == LB_ERROR_WORKER_OUT_OF_RANGE ||
+	    serverErr == LB_ERROR_WORKER_NOT_STARTED)){
+	  //Worker start has not been registered. Send a start petition
+	  extStartHandler(2,sleeptime,verbose);
+	  extReportHTTP(serverErr,nIterDone,rep_time,verbose,trusted);
+	}
+      }     
+      return;
+    }
+#endif
+    // **********************   HTTP END   **********************
+  }
+}
+
+void LB::task::extFinishHandler(const unsigned long long nIterDone,
+				const std::chrono::steady_clock::time_point& rep_time,
+				const std::chrono::seconds sleeptime,
+				const unsigned verbose){
+  if(ext_balance){
+
+    // ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+    // HTTP
+    //*******
+    if(ext_http){
+      int serverErr;
+      int errRep = extFinishHTTP(serverErr,nIterDone,rep_time,verbose);
+      if(errRep != LB_SUCCESS){
+	if(errRep != LB_REMOTE_ERROR){
+	  //Connection error, try again
+	  std::this_thread::sleep_for(sleeptime);	
+	  errRep = extFinishHTTP(serverErr,nIterDone,rep_time,verbose);
+	  if(errRep == LB_SUCCESS)
+	    return;
+	}
+
+	if(errRep == LB_REMOTE_ERROR &&
+	   (serverErr == LB_ERROR_WORKER_OUT_OF_RANGE ||
+	    serverErr == LB_ERROR_WORKER_NOT_STARTED)){
+	  //Worker start has not been registered. Send a start petition
+	  extStartHandler(2,sleeptime,verbose);
+	  extFinishHTTP(serverErr,nIterDone,rep_time,verbose);
+	}
+      }     
+      return;
+    }
+#endif
+    // **********************   HTTP END   **********************
+
+  }
+}
+
 int LB::task::setWorkers(const size_t nw, const unsigned verbose){
 
   //Clear current configuration and prepare a new one
@@ -285,6 +775,7 @@ int LB::task::setWorkers(const size_t nw, const unsigned verbose){
       fprintf(fth,"%07ld s - LB:task:setworkers: Error: Require, at least, "
 	      "one worker.\n",
 	      static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     return LB_ERROR_INVALID_WORKER_NUMBER;
   }
@@ -298,6 +789,7 @@ int LB::task::setWorkers(const size_t nw, const unsigned verbose){
       fprintf(fth,"%07ld s - LB:task:setworkers: Error: This task "
 	      "is already running.\n",
 	      static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     return LB_ERROR_CURRENT_TASK_RUNNING;
   }
@@ -329,11 +821,14 @@ int LB::task::workerStart(const size_t iw, const unsigned verbose){
     return LB_ERROR_WORKER_OUT_OF_RANGE;
   }
 
+  const auto& actualTime = std::chrono::steady_clock::now();
+  
   if(verbose > 1){
     const std::lock_guard<std::mutex> lockTh(mtxfth);      
     fprintf(fth,"%07ld s - LB:task:worker %lu: Enter the task.\n",
 	    static_cast<long int>(timeStamp()),
 	    static_cast<unsigned long>(iw));
+    fflush(fth);
   }
   
   //Check if this task has started already
@@ -344,16 +839,19 @@ int LB::task::workerStart(const size_t iw, const unsigned verbose){
       fprintf(fth,"%07ld s - LB:task:worker %lu: Initialize the task.\n",
 	      static_cast<long int>(timeStamp()),
 	      static_cast<unsigned long>(iw));
+      fflush(fth);
     }
     
-    taskBegin = std::chrono::steady_clock::now();
+    taskBegin = actualTime;
     lastCheckPoint = taskBegin;
     started = true; //Task begins now
     finished = false;
-    //Sleep a few seconds to avoid an interval of 0 seconds
-    //on first worker measure
-    std::this_thread::sleep_for (std::chrono::seconds(3));
 
+    // **** External LB **** //
+    //If enabled, send a start request to external balancer
+    extStartHandler(5,std::chrono::seconds(5),verbose);
+    // **** External LB **** //
+    
 // **************************** MPI ********************************* //
 #ifdef _PEN_USE_MPI_
     //Start MPI monitor in a thread
@@ -370,11 +868,10 @@ int LB::task::workerStart(const size_t iw, const unsigned verbose){
   unsigned long long toDo = remaining/nworkers;
 
   //Start the worker
-  int ret = taskWorker.start(taskBegin,toDo);
-    
+  int ret = taskWorker.start(actualTime,toDo);
+
   //Release all worker locks
   unlockWorkers();
-
 	    
   return ret;
 }
@@ -396,7 +893,8 @@ bool LB::task::workerFinish(const size_t iw,
     const std::lock_guard<std::mutex> lockTh(mtxfth);      
     fprintf(fth,"%07ld s - LB:task:workerFinish: Worker %lu: Asking "
 	    "to finish.\n",
-	    static_cast<long int>(timeStamp()),iw);    
+	    static_cast<long int>(timeStamp()),iw);
+    fflush(fth);
   }
   
   { //Create a local scope for lock_guard
@@ -477,7 +975,21 @@ bool LB::task::workerFinish(const size_t iw,
 	fprintf(fth,"%07ld s - LB:task:workerFinish: Last worker has been "
 		"finished the task.\n",
 		static_cast<long int>(timeStamp()));
+	fflush(fth);
       }
+
+  // **** External LB **** //      
+#ifndef _PEN_USE_MPI_
+      //If MPI is not enabled, external balance finish requests
+      //are handled here
+      if(ext_balance){
+	//Send finish request
+	extFinishHandler(doneTrusted(),
+			 std::chrono::steady_clock::now(),
+			 std::chrono::seconds(5),verbose);
+      }
+#endif
+  // **** External LB **** //      
     }
   }
   unlockWorkers();
@@ -514,6 +1026,7 @@ std::chrono::seconds::rep LB::task::report(const size_t iw,
       const std::lock_guard<std::mutex> lockTh(mtxfth);
       fprintf(fth,"%07ld s - LB:task:report:Error: Worker %lu out of range.\n",
 	      static_cast<long int>(timeStamp()),iw);
+      fflush(fth);
     }
     if(errRet != nullptr) (*errRet) = LB_ERROR_WORKER_OUT_OF_RANGE;
     return std::chrono::seconds::rep(-1);
@@ -529,8 +1042,10 @@ std::chrono::seconds::rep LB::task::report(const size_t iw,
   if(!taskWorker.begins()){
     if(verbose > 0){
       const std::lock_guard<std::mutex> lockTh(mtxfth);      
-      fprintf(fth,"%07ld s - LB:task:report:Error: Worker %lu doesn't started.\n",
+      fprintf(fth,"%07ld s - LB:task:report:Error: Worker %lu "
+	      "doesn't started.\n",
 	      static_cast<long int>(timeStamp()),iw);
+      fflush(fth);
     }
     if(errRet != nullptr) (*errRet) = LB_ERROR_WORKER_NOT_STARTED;
     return std::chrono::seconds::rep(-1);
@@ -541,6 +1056,7 @@ std::chrono::seconds::rep LB::task::report(const size_t iw,
       const std::lock_guard<std::mutex> lockTh(mtxfth);      
       fprintf(fth,"%07ld s - LB:task:report:Error: Worker %lu has finished.\n",
 	      static_cast<long int>(timeStamp()),iw);
+      fflush(fth);
     }
     if(errRet != nullptr) (*errRet) = LB_ERROR_WORKER_FINISHED;
     return std::chrono::seconds::rep(-1);
@@ -553,6 +1069,7 @@ std::chrono::seconds::rep LB::task::report(const size_t iw,
       fprintf(fth,"%07ld s - LB:task:report:Error: Worker %lu unconsistent "
 	      "iteration progress.\n",
 	      static_cast<long int>(timeStamp()),iw);
+      fflush(fth);
     }
     if(errRet != nullptr) (*errRet) = LB_ERROR_LESS_ITERATIONS_DONE;
     return std::chrono::seconds::rep(-1);
@@ -602,6 +1119,7 @@ int LB::task::checkPoint(const unsigned verbose){
       const std::lock_guard<std::mutex> lockTh(mtxfth);      
       fprintf(fth,"%07ld s - LB:task:checkPoint:Error: No available workers.\n",
 	      static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     unlockWorkers();
     return LB_WARNING_NO_AVAILABLE_WORKERS;
@@ -612,6 +1130,7 @@ int LB::task::checkPoint(const unsigned verbose){
       const std::lock_guard<std::mutex> lockTh(mtxfth);      
       fprintf(fth,"%07ld s - LB:task:checkPoint:Warning: Nothing to do.\n",
 	      static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     unlockWorkers();
     return LB_WARNING_NOTHING_TO_DO;
@@ -620,7 +1139,7 @@ int LB::task::checkPoint(const unsigned verbose){
   //Get actual time
   std::chrono::steady_clock::time_point actualTime =
     std::chrono::steady_clock::now();
-
+  
   //Calculate elapsed time since previous checkpoint
   std::chrono::seconds::rep timeInterval = std::chrono::duration_cast<
     std::chrono::seconds>(actualTime-lastCheckPoint).count();
@@ -632,6 +1151,7 @@ int LB::task::checkPoint(const unsigned verbose){
       fprintf(fth,"%07ld s - LB:task:checkPoint: Warning: Insufficient time "
 	      "since previous checkpoint.\n",
 	      static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     timeInterval = 1;
   }
@@ -656,9 +1176,17 @@ int LB::task::checkPoint(const unsigned verbose){
     else
       iterPred += taskWorker.done();
   }
+  
+  // **** External LB **** //
+#ifndef _PEN_USE_MPI_
+  //If MPI is not enabled, external balance reports are handled at checkpoints
+  extReportHandler(iterPred,actualTime,
+		   std::chrono::seconds(5),verbose,true);
+#endif
+  // **** External LB **** //
 
   if(iterations <= iterDone){
-
+    
     for(worker& taskWorker : workers){
       //Assign the number of iterations
       //to do equal to the iterations done
@@ -674,6 +1202,7 @@ int LB::task::checkPoint(const unsigned verbose){
       fprintf(fth,"%07ld s - LB:task:checkPoint: Objective "
 	      "iterations reached.\n",
 	      static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     
     //Release all workers
@@ -696,6 +1225,7 @@ int LB::task::checkPoint(const unsigned verbose){
 	    "iterations, ETA: %llu s .\n",
 	    static_cast<long int>(timeStamp()),
 	    remaining,remainingTime);
+    fflush(fth);
   }
   
   //Calculate remaining registered iterations
@@ -715,7 +1245,8 @@ int LB::task::checkPoint(const unsigned verbose){
       else
 	fprintf(fth,"%07ld s - LB:task:checkPoint: Remaining time above "
 		"the threshold, perform a balancing process.\n",
-		static_cast<long int>(timeStamp()));            
+		static_cast<long int>(timeStamp()));
+      fflush(fth);
     }
     mtxMPI.unlock();
 #else
@@ -725,7 +1256,8 @@ int LB::task::checkPoint(const unsigned verbose){
 	const std::lock_guard<std::mutex> lockTh(mtxfth);      
 	fprintf(fth,"%07ld s - LB:task:checkPoint: Remaining time above "
 		"the threshold, perform a balancing process.\n",
-		static_cast<long int>(timeStamp()));            
+		static_cast<long int>(timeStamp()));
+	fflush(fth);
       }
 #endif
       
@@ -758,6 +1290,7 @@ int LB::task::checkPoint(const unsigned verbose){
 		      "assigned iterations: %llu\n",
 		      static_cast<long int>(timeStamp()),
 		      localSpeed,taskWorker.assigned);
+	      fflush(fth);
 	    }
 	  }
 	}
@@ -840,9 +1373,7 @@ unsigned long long LB::task::done(){
   return iterDone;
 }
 
-int LB::task::setIterations(const unsigned long long nIter){
-
-  lockWorkers();
+int LB::task::setIterationsTrusted(const unsigned long long nIter){
 
   double lastSpeed = -1.0;
   if(remainingTime > 0)
@@ -867,8 +1398,6 @@ int LB::task::setIterations(const unsigned long long nIter){
     remainingTime = 10000000000;
   
   iterations = nIter;
-  
-  unlockWorkers();
   
   return LB_SUCCESS;
 }
@@ -975,7 +1504,7 @@ void LB::task::sendReportMPI(std::chrono::steady_clock::time_point& lastReport,
     MPIworkers[0].addMeasure(elapsedTime,predIterDone);
 
     //Rebalance MPI workers
-    unsigned long long MPIremainingTime = balanceMPI();
+    unsigned long long MPIremainingTime = balanceMPI(verbose);
 
     if(verbose > 1){
       fprintf(fMPI,"%07ld s - task:monitor:Rank 0: New local iteration "
@@ -1063,7 +1592,7 @@ void LB::task::sendReportMPI(std::chrono::steady_clock::time_point& lastReport,
 }
 
 float LB::task::receiveReportMPI(const unsigned inode,
-				const unsigned verbose){
+				 const unsigned verbose){
   int rank;
   MPI_Comm_rank(comm, &rank);
 
@@ -1121,7 +1650,7 @@ float LB::task::receiveReportMPI(const unsigned inode,
 			       iterDone[0]);
 
     //Rebalance MPI workers
-    unsigned long long MPIremainingTime = balanceMPI();
+    unsigned long long MPIremainingTime = balanceMPI(verbose);
     unsigned long long buffer[2] = {MPIworker.assigned,0};
 
     //Update local assignation
@@ -1164,7 +1693,7 @@ float LB::task::receiveReportMPI(const unsigned inode,
   return dev;
 }
 
-unsigned long long LB::task::balanceMPI(){
+unsigned long long LB::task::balanceMPI(const unsigned verbose){
   
   //Get speed and iterations done
   float totalSpeed;
@@ -1172,6 +1701,18 @@ unsigned long long LB::task::balanceMPI(){
   if(totalSpeed <= 0.0)
     return 1000000000000000;
 
+  // **** External LB **** //
+  if(ext_balance){
+    //Send a report to the external load balancer
+    //Get actual time
+    std::chrono::steady_clock::time_point actualTime =
+      std::chrono::steady_clock::now();
+    extReportHandler(predDoneMPI(actualTime),actualTime,
+		     std::chrono::seconds(5),verbose,true);
+  }
+  // **** External LB **** //
+
+  unsigned long long MPIremainingTime = 0ull;
   //Check if there are something to do
   if(totalIterDone >= MPIiterations){
     for(guessWorker& worker : MPIworkers){
@@ -1179,7 +1720,6 @@ unsigned long long LB::task::balanceMPI(){
 	worker.assigned = worker.done();
       }
     }
-    return 0ull;
   }
   else{
     //Calculate remaining iterations
@@ -1193,8 +1733,20 @@ unsigned long long LB::task::balanceMPI(){
 	worker.assigned = worker.done() + toDo;
       }
     }
-    return static_cast<double>(MPIremaining)/totalSpeed;
+    MPIremainingTime = static_cast<double>(MPIremaining)/totalSpeed;
   }
+
+  // **** External LB **** //
+  if(ext_balance && MPIremainingTime <= threshold){
+    //Send finish signal with all iterations completed
+    std::chrono::steady_clock::time_point actualTime =
+      std::chrono::steady_clock::now();
+    extFinishHandler(MPIiterations,actualTime + std::chrono::seconds(2),
+		     std::chrono::seconds(5),verbose);
+  }
+  // **** External LB **** //
+  
+  return MPIremainingTime;
 }
 
 void LB::task::monitor(const unsigned verbose){
@@ -1507,7 +2059,7 @@ void LB::task::monitor(const unsigned verbose){
 	  MPI_Send(static_cast<void*>(&toDo),1,
 		   MPI_UNSIGNED_LONG_LONG,inode,tagProc,comm);	  
 	}
-	else{	
+	else{
 	  //Calculate iterations to assign
 	  float speed;
 	  unsigned long long iterDone = speedMPI(speed);
@@ -2092,11 +2644,11 @@ int LB::task::printReport(FILE* fout) const{
     worker.printReport(fout);
     fprintf(fout,"\n\n");
     ++iw;
-  }  
+  }
   return LB_SUCCESS;
 }
 
-
+ 
 void LB::task::reset(){
   clear();
 // **************************** MPI ********************************* //
@@ -2104,4 +2656,653 @@ void LB::task::reset(){
   clearMPI();
 #endif
 // **************************** MPI ********************************* //
+}
+
+// ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+int LB::task::extHTTPserver(const unsigned extern_iw,
+			    const char* url,
+			    const unsigned verbose){
+
+  FILE* flog = fth;
+  int rank = 0;
+#ifdef _PEN_USE_MPI_
+  MPI_Comm_rank(comm, &rank);
+  flog = fMPI;
+#endif
+
+  if(flog == nullptr){
+    if(verbose > 0){
+      printf("LB::task::initExternalBalance: Error: "
+	     "Task has not initialised.\n");
+    }
+    return LB_ERROR_TASK_NOT_INITIALISED;
+  }
+
+  if(rank != 0){
+    if(verbose > 0){
+      fprintf(flog,"LB::task::initExternalBalance: Error: \n"
+	      "Externam balance must be handled by rank 0.\n");
+      fflush(flog);
+    }
+    return LB_ERROR_HANDLED_BY_RANK0;
+  }  
+
+  //Init CURL
+  curl_global_init(CURL_GLOBAL_DEFAULT);  
+  
+  //Save extern worker number
+  ext_iworker = extern_iw;
+  //Enable external http balance
+  ext_balance = true;
+  ext_http = true;
+
+  //Save base url
+  baseURL.assign(url);
+
+  //Create methods urls
+  startURL.assign(baseURL);
+  startURL.append("/start");
+
+  reportURL.assign(baseURL);
+  reportURL.append("/report");
+
+  finishURL.assign(baseURL);
+  finishURL.append("/finish");
+  
+  return LB_SUCCESS;  
+}
+#endif
+// **********************   HTTP END   **********************
+ 
+//********************
+//**  Task server
+//********************
+
+int LB::taskServer::setLogFile(const char* logFileName,
+			       const unsigned verbose){
+
+  if(flog != nullptr)
+    fclose(flog);
+  flog = nullptr;
+
+  if(logFileName != nullptr){
+    flog = fopen(logFileName,"w");
+    if(flog == nullptr){
+      if(verbose > 0)
+	printf("LB:taskServer:setLogFile: Error: Unable to create log "
+	       "file: %s\n",logFileName);
+      return LB_ERROR_UNABLE_TO_CREATE_FILE;
+    }
+  }
+
+  return LB_SUCCESS;
+}
+  
+int LB::taskServer::init(const size_t nw,
+			 const unsigned long long nIter,
+			 const char* logFileName,
+			 const unsigned verbose){
+
+  if(filterLog(verbose,1)){
+    fprintf(flog,"%07ld s - Initialize task with %lu workers "
+	    "and %llu iterations\n",
+	    static_cast<long int>(timeStamp()),
+	    static_cast<unsigned long>(nw),nIter);
+    fflush(flog);
+  }
+  
+  //Clear previous configuration
+  clear();
+      
+  //Create workers
+  workers.resize(nw);
+  workerInits.resize(nw);
+  workerResumes.resize(nw);
+  
+  //Save number of iterations
+  iterations = nIter;
+  remaining = nIter;
+  
+  if(logFileName != nullptr){
+    return setLogFile(logFileName,verbose);
+  }
+
+  return LB_SUCCESS;
+}
+
+int LB::taskServer::workerStart(const size_t iw,
+				const std::chrono::steady_clock::time_point& t,
+				const unsigned verbose){
+
+   if(filterLog(verbose,1)){
+     fprintf(flog,"%07ld s - Worker %lu starting.\n",
+	     static_cast<long int>(timeStamp()),
+	     static_cast<unsigned long>(iw));
+     fflush(flog);
+   }
+      
+   if(iw >= workers.size()){
+     //New worker added, resize vector of workers
+     workers.resize(iw+1);
+     workerInits.resize(iw+1);
+     workerResumes.resize(iw+1);
+     if(filterLog(verbose,1)){
+       fprintf(flog,"%07ld s - Adding workers until worker %lu.\n",
+	       static_cast<long int>(timeStamp()),
+	       static_cast<unsigned long>(iw));
+       fflush(flog);
+     }
+   }
+
+   if(!started){
+     started = true;
+     finished = false;
+   }
+
+   //Get worker
+   guessWorker& taskWorker = workers[iw];
+      
+   //Calculate iterations to assign
+   unsigned long long toDo = remaining/workers.size();
+
+   if(filterLog(verbose,1)){
+     fprintf(flog,"   Initial iteration assign: %llu\n",toDo);
+     fflush(flog);
+   }
+   
+   //Start the worker
+   int ret = taskWorker.start(t,toDo);
+   if(ret == LB_SUCCESS){
+     //Save worker init
+     workerInits[iw] = t;
+     //Save worker first "resume"
+     workerResumes[iw] = t;
+   } else if(ret == LB_ERROR_WORKER_ALREADY_STARTED){
+     //Worker already started. We interpret this as a
+     //crashed worker resuming its execution
+     //So, add a dummy measure with the same iterations done
+     //to avoid erroneous elapsed time measures
+     taskWorker.addMeasure(t,taskWorker.done());
+     //Ensure that the time is updated even if "addMeasure"
+     //doesn't creates a new measure
+     taskWorker.setLastTime(t);
+     //Save this timepoint as the new worker resume point
+     workerResumes[iw] = t;
+     if(filterLog(verbose,1)){
+       fprintf(flog,"   Resuming crashed worker\n");
+       fflush(flog);
+     }     
+     return LB_SUCCESS;
+   }
+   return ret;
+}
+
+int LB::taskServer::workerFinish(const size_t iw,
+				 const std::chrono::steady_clock::time_point& t,
+				 const unsigned long long nIter,
+				 const unsigned verbose){
+
+   if(filterLog(verbose,1)){
+     fprintf(flog,"%07ld s - Worker %lu finishing.\n",
+	     static_cast<long int>(timeStamp()),
+	     static_cast<unsigned long>(iw));
+     fflush(flog);
+   }
+
+   //Perform a report without balance
+   int err = report(iw,t,nIter,verbose,false);
+   if(err == LB_SUCCESS){
+     
+     //Finish worker
+     workers[iw].end();
+
+     //Check if some worker is working
+     for(const auto& worker : workers)
+       if(!worker.finishes()){
+	 //Some worker is workning, balance remaining workers
+	 balance(verbose);
+       }
+   }
+   else if(err == LB_ERROR_TASK_ALREADY_FINISHED){
+     //Finish worker
+     workers[iw].end();     
+   }
+   return err;
+}
+ 
+int LB::taskServer::report(const size_t iw,
+			   const std::chrono::steady_clock::time_point& t,
+			   const unsigned long long nIter,
+			   const unsigned verbose,
+			   const bool doBalance){
+  //Updates worker information according to the number of
+  //iterations done and the last report
+
+  //We suppose that this function is not called before the
+  //task start (before the first call to "workerStart").
+  //With this assumption, we only need to lock the worker
+  //specified by "iw".
+
+  if(iw >= workers.size()){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"%07ld s - Error: Worker index (%lu) out of range.\n",
+	      static_cast<long int>(timeStamp()),
+	      static_cast<unsigned long>(iw));
+      fflush(flog);
+    }
+    return LB_ERROR_WORKER_OUT_OF_RANGE;
+  }
+
+  //Get worker reference
+  guessWorker& taskWorker = workers[iw];
+  
+  if(filterLog(verbose,1)){
+    fprintf(flog,"%07ld s - Reporting %llu iterations done by "
+	    "worker %lu at local timestamp %07ld s.\n",
+	    static_cast<long int>(timeStamp()),
+	    nIter,static_cast<unsigned long>(iw),
+	    static_cast<long int>(taskWorker.timeStamp(t)));
+    fflush(flog);
+  }
+
+  //Check if this worker is doing this task
+  if(!taskWorker.begins()){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"%07ld s - Error: Worker %lu doesn't started.\n",
+	      static_cast<long int>(timeStamp()),iw);
+      fflush(flog);
+    }
+    return LB_ERROR_WORKER_NOT_STARTED;
+  }
+
+  if(taskWorker.finishes()){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"%07ld s - Error: Worker %lu has finished.\n",
+	      static_cast<long int>(timeStamp()),iw);
+      fflush(flog);
+    }
+    return LB_ERROR_WORKER_FINISHED;
+  }
+      
+  float dev = taskWorker.addMeasure(t,nIter);
+
+  if(filterLog(verbose,0)){
+    fprintf(flog,"%07ld s - Deviation since previous report: %.2f%%\n",
+	    static_cast<long int>(timeStamp()),(dev-1.0)*100.0);	      
+    fflush(flog);
+  }
+  
+  if(finished){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"%07ld s - Warning: Task already finished, "
+	      "no balance will be performed.\n",
+	      static_cast<long int>(timeStamp()));
+      fflush(flog);
+    }
+    return LB_ERROR_TASK_ALREADY_FINISHED;
+  }  
+  if(doBalance && taskWorker.registers() > 2){
+    //Balance workers
+    balance(verbose);
+  }
+  
+  return LB_SUCCESS;
+}
+
+void LB::taskServer::balance(const unsigned verbose){
+
+  if(filterLog(verbose,1)){
+    fprintf(flog,"%07ld s - Balancing iteration assignation\n",
+	    static_cast<long int>(timeStamp()));	        
+    fflush(flog);
+  }
+  
+  if(!started){
+    if(filterLog(verbose,1)){
+      fprintf(flog,"          Task has not started\n");
+      fflush(flog);
+    }
+    remainingTime = 1000000000000000ull;
+    return;
+  }
+
+  if(finished){
+    if(filterLog(verbose,1)){
+      fprintf(flog,"          Task has finished\n");
+      fflush(flog);
+    }
+    remainingTime = 0ull;
+    return;
+  }
+
+  const auto now = std::chrono::steady_clock::now();
+   
+  float totalSpeed;
+  unsigned long long totalIterDone = speed(totalSpeed,now);
+
+  if(filterLog(verbose,1)){
+    fprintf(flog,"          Iterations done: %llu\n"
+	         "                    Speed: %12.5E\n",
+	    totalIterDone,totalSpeed);
+    fflush(flog);
+  }
+      
+  //Check if there are something to do
+  if(totalIterDone >= iterations){
+    for(guessWorker& worker : workers){
+      if(worker.begins() && !worker.finishes()){
+	worker.assigned = worker.done();
+      }
+    }
+    finished = true;
+    remaining = 0ull;
+    remainingTime = 0ull;
+  }else{
+    //Calculate remaining iterations
+    remaining = iterations - totalIterDone;
+
+    //Check global speed 
+    if(totalSpeed <= 0.0){
+      remainingTime = 1000000000000000ull;
+      return;
+    }
+
+    unsigned long long pred = predDone();
+    if(pred >= iterations)
+      remainingTime = 0llu;
+    else
+      remainingTime = static_cast<double>(iterations-pred)/totalSpeed;
+    if(filterLog(verbose,1)){
+      fprintf(flog,"Predicted iterations done: %llu ETA: %llu s\n",
+	      pred,remainingTime);
+      fflush(flog);
+    }
+
+    //If remaining time is lesser than half threshold avoid rebalance
+    if(remainingTime < threshold/2){
+      return; //Avoid rebalance
+    }
+  
+    //Assign iterations to each worker
+    unsigned long long nworkers = workers.size();
+    unsigned long cont = 0;
+    for(guessWorker& worker : workers){
+      if(worker.begins() && !worker.finishes()){
+	//Check if the last report of this worker has been done recently.
+	//If the server has not received reports from this worker
+	//since "threshold", it will be considered as stopped
+	//or crashed worker.
+	unsigned long long telaps = worker.elapsed(now);
+	if(telaps > threshold){
+	  if(filterLog(verbose,1))
+	    fprintf(flog,"    Worker %3lu is missing  -> done : %llu\n",
+		    cont,worker.done());
+	   
+	  ++cont;
+	  continue;
+	}
+	unsigned long long toDo = remaining*(worker.speed()/totalSpeed);
+	toDo = std::max(toDo,nworkers);
+	worker.assigned = worker.done() + toDo;
+	 
+	if(filterLog(verbose,1))
+	  fprintf(flog,"    Worker %3lu is active   -> done : %llu/%llu\n",
+		  cont,worker.done(),worker.assigned);
+	 
+      }else{
+	if(filterLog(verbose,1))
+	  fprintf(flog,"    Worker %3lu is inactive -> done : %llu\n",
+		  cont,worker.done());
+      }
+      ++cont;
+    }
+    if(filterLog(verbose,1))
+      fflush(flog);
+  }
+}
+
+void LB::taskServer::clear(){
+  iterations = remaining = 0llu;
+  threshold = 300llu;
+  started = finished = false;
+
+  remainingTime = 100000000000;
+  workers.clear();
+  workerInits.clear();
+  workerResumes.clear();
+}
+ 
+int LB::taskServer::load(FILE* fin,
+			 const unsigned verbose){
+  if(fin == nullptr)
+    return LB_ERROR_NULL_POINTER;
+
+  clear();
+
+  unsigned long nworkers;
+  int istarted, ifinished;
+  fscanf(fin," %llu %llu %llu %llu %lu %d %d ",
+	 &iterations, &remaining, &remainingTime,
+	 &threshold,&nworkers,&istarted,&ifinished);
+
+  started = istarted;
+  finished = ifinished;
+  
+  //Allocate memory for each worker
+  workers.resize(nworkers);
+  workerInits.resize(nworkers);
+  workerResumes.resize(nworkers);
+  
+  //Load worker inits
+  for(auto& wInit : workerInits){
+    long int aux;
+    if(fscanf(fin,"%ld",&aux) != 1){
+      return LB_ERROR_UNEXPECTED_FORMAT;
+    }
+    wInit = taskBegin + std::chrono::seconds(aux);
+  }
+
+  //Load worker resumes
+  for(auto& wResume : workerResumes){
+    long int aux;
+    if(fscanf(fin,"%ld",&aux) != 1){
+      return LB_ERROR_UNEXPECTED_FORMAT;
+    }
+    wResume = taskBegin + std::chrono::seconds(aux);
+  }
+  
+  //Load worker information
+  size_t cont = 0;
+  for(auto& worker : workers){
+    int err = worker.load(fin,workerInits[cont]);
+    if(err != LB_SUCCESS){
+      if(filterLog(verbose,0))
+	fprintf(flog,"%07ld s - Unable to load worker %lu.\n",
+		static_cast<long int>(timeStamp()),
+		static_cast<long unsigned>(cont));
+      worker.reset();
+      fflush(flog);
+    }
+    ++cont;
+  }
+  return LB_SUCCESS;
+}
+ 
+int LB::taskServer::dump(const char* saveFilename,
+			 const unsigned verbose){
+  if(filterLog(verbose,1)){
+    fprintf(flog,"%07ld s - Dumping recorded data to %s\n",
+	    static_cast<long int>(timeStamp()),saveFilename);
+    fflush(flog);
+  }
+
+  if(saveFilename == nullptr){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"      Error: specified save filename is a null pointer\n");
+      fflush(flog);
+    }
+    return LB_ERROR_NULL_POINTER;
+  }
+
+  FILE* fdump = nullptr;
+  fdump = fopen(saveFilename,"w");
+  if(fdump == nullptr){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"     Error: Unable to create dump file '%s'\n",saveFilename);
+      fflush(flog);
+    }
+    return LB_ERROR_UNABLE_TO_CREATE_FILE;
+  }
+
+  fprintf(fdump,"%llu %llu %llu %llu %lu %d %d\n",
+	 iterations, remaining, remainingTime,
+	 threshold,static_cast<unsigned long>(workers.size()),
+	 started,finished);
+
+  //Dump worker inits
+  for(const auto& wInit : workerInits){
+    fprintf(fdump,"%ld\n",static_cast<long int>(timeStamp(wInit)));
+  }
+
+  //Dump worker resumes
+  for(const auto& wResume : workerResumes){
+    fprintf(fdump,"%ld\n",static_cast<long int>(timeStamp(wResume)));
+  }
+  
+  //Dump worker information
+  for(const auto& worker : workers){
+    worker.dump(fdump);
+  }
+      
+  return LB_SUCCESS;
+}
+
+
+int LB::taskServer::receiveReport(const size_t iw,
+				  const unsigned long long nIter,
+				  const long int elapsed,
+				  unsigned long long& newAssign,
+				  const unsigned verbose){
+
+  if(iw >= workers.size()){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"%07ld s - Error: Worker index (%lu) out of range.\n",
+	      static_cast<long int>(timeStamp()),iw);
+      fflush(flog);
+    }
+    return LB_ERROR_WORKER_OUT_OF_RANGE;
+  }
+  else{
+    //Calculate worker report steady point 
+    auto reportTime = workerTP(iw,std::chrono::seconds(elapsed));
+
+    //If the worker reports a elapsed time lesser than previous one
+    //we require a new start petition to ajust the time. This could
+    //happens on resumed crashed workers.
+    if(workers[iw].elapsed(reportTime) <= 0){
+      return LB_ERROR_WORKER_NOT_STARTED;
+    }
+    
+    //Perform the report
+    int ret = report(iw,reportTime,nIter,verbose);
+    newAssign = workers[iw].assigned;
+    return ret;
+  }
+}
+
+int LB::taskServer::receiveStart(const size_t iw,
+				 const long int elapsed,
+				 unsigned long long& newAssign,
+				 const unsigned verbose){
+  //Calculate worker start steady point 
+  auto workerInit =
+    std::chrono::steady_clock::now() - std::chrono::seconds(elapsed);
+	  
+  //Start worker
+  int ret = workerStart(iw,workerInit,verbose);
+  if(ret == LB_SUCCESS)
+    newAssign = workers[iw].assigned;
+  return ret;
+}
+
+int LB::taskServer::receiveFinish(const size_t iw,
+				  const unsigned long long nIter,
+				  const long int elapsed,
+				  const unsigned verbose){
+  if(iw >= workers.size()){
+    if(filterLog(verbose,0)){
+      fprintf(flog,"%07ld s - Error: Worker index (%lu) out of range.\n",
+	      static_cast<long int>(timeStamp()),iw);
+      fflush(flog);
+    }
+    return LB_ERROR_WORKER_OUT_OF_RANGE;
+  }
+  else{
+    //Calculate worker report steady point 
+    auto finishTime = workerTP(iw,std::chrono::seconds(elapsed));    
+    return workerFinish(iw,finishTime,nIter,verbose);
+  }
+}
+
+void LB::taskServer::createError(const int prefix, const int errcode,
+				 const char* errmessage,
+				 char err[pen_tcp::messageLen],
+				 const unsigned verbose){
+
+  //Construct error message
+  if(errmessage == nullptr){
+    snprintf(err,pen_tcp::messageLen,"%d\n%d\n",prefix,errcode);
+  }
+  else{
+    snprintf(err,pen_tcp::messageLen,"%d\n%d\n%s\n",
+	     prefix,errcode,errmessage);
+  }
+
+  if(filterLog(verbose,2)){
+    fprintf(flog,"%07ld s - Error message\n"
+	    "                  Prefix: %d\n"
+	    "              Error code: %d\n"
+	    "           Error message: %s\n",
+	    static_cast<long int>(timeStamp()),
+	    prefix,errcode,
+	    errmessage == nullptr ? "none" : errmessage);
+    fflush(flog);
+  }
+}
+
+int LB::taskServer::printReport(FILE* fout) const{
+
+  if(fout == nullptr)
+    return LB_ERROR_NULL_POINTER;
+
+  fprintf(fout,"# Task load balance report.\n");
+  unsigned iw = 0;
+  for(const auto& worker: workers){
+    fprintf(fout,"# Worker %03u\n",iw);
+    worker.printReport(fout,taskBegin);
+    fprintf(fout,"\n\n");
+    ++iw;
+  }
+  return LB_SUCCESS;
+}
+
+LB::taskServer::~taskServer(){
+  if(flog != nullptr)
+    fclose(flog);
+  flog = nullptr;
+  clear();
+}
+
+
+std::string pen_tcp::trim(const std::string& str,
+			  const std::string& whitespace){
+    const auto strBegin = str.find_first_not_of(whitespace);
+    if(strBegin == std::string::npos)
+      return ""; // no content
+
+    const auto strEnd = str.find_last_not_of(whitespace);
+    const auto strRange = strEnd - strBegin + 1;
+
+    return str.substr(strBegin, strRange);
 }

@@ -25,32 +25,23 @@
 #    
 #
 
+#----------------------------------------------------------------------------
+# Check CMake version
+cmake_minimum_required(VERSION 3.0 FATAL_ERROR)
+#-----------------------------------------------------------------------------
 
-#############################
-#  Load Balance 
-#############################
+#-----------------------------------------------------------------------------
+# Project name
+project(RUPER-LB LANGUAGES CXX)
+#-----------------------------------------------------------------------------
 
-if(WITH_MPI)
-    #Find MPI package
-    find_package(MPI REQUIRED)
-endif(WITH_MPI)
+#-----------------------------------------------------------------------------
+option(WITH_MPI "Build with MPI " OFF)
+option(WITH_HTTP "Build with HTTP " OFF)
+#-----------------------------------------------------------------------------
 
-if(WITH_HTTP)
-    #Find curl package
-    find_package(CURL REQUIRED)
-endif(WITH_HTTP)
-
-# Create lib
-add_library(rupper STATIC ${PROJECT_SOURCE_DIR}/src/ruperLB.cpp)
-
-target_include_directories(rupper PUBLIC ${PROJECT_SOURCE_DIR}/src/)
-
-if(WITH_MPI)
-    target_include_directories(rupper PUBLIC ${MPI_INCLUDE_PATH})
-    target_link_libraries(rupper ${MPI_LIBRARIES})
-endif(WITH_MPI)
-
-if(WITH_HTTP)
-    target_include_directories(rupper PUBLIC ${CURL_INCLUDE_DIR})
-    target_link_libraries(rupper ${CURL_LIBRARIES})
-endif(WITH_HTTP)
+#Add ruper-lb directory
+add_subdirectory(${PROJECT_SOURCE_DIR}/src)
+ 
+#Add exemple directories
+add_subdirectory(${PROJECT_SOURCE_DIR}/examples/1)

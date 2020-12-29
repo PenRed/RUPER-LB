@@ -1,4 +1,3 @@
-
 //
 //
 //    Copyright (C) 2020 Universitat Politècnica de València - UPV
@@ -21,13 +20,14 @@
 //
 //    contact emails:
 //
-//        vicent.gimenez.alventosa@gmail.com
+//        vicent.gimenez.alventosa@gmail.com (Vicent Giménez Alventosa)
 //
 
 #ifndef __PEN_LOAD_BALANCE__
 #define __PEN_LOAD_BALANCE__
 
 #include <chrono>
+#include <ctime>
 #include <vector>
 #include <mutex>
 #include <stdexcept>
@@ -39,6 +39,13 @@
 #include "mpi.h"
 #endif
 // ***************************** MPI END ********************************** //
+
+// ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+#include <curl/curl.h>
+#endif
+// **********************   HTTP END   **********************
+
 
 enum LB_ERRCODE{
 		LB_SUCCESS = 0,                 //0
@@ -66,7 +73,26 @@ enum LB_ERRCODE{
 		LB_ERROR_MPI_ON_UPDATE,         //22
 		LB_ERROR_NULL_POINTER,          //23
 		LB_ERROR_INVALID_FILE,          //24
+		LB_ERROR_UNABLE_TO_CREATE_FILE, //25
+		LB_ERROR_TASK_ALREADY_FINISHED, //26
+		LB_ERROR_CONFIGURING_CONNECTION,//27
+		LB_ERROR_TASK_NOT_INITIALISED,  //28
+		LB_ERROR_UNEXPECTED_FORMAT,     //29
+		LB_UNABLE_TO_CREATE_REQUEST,    //30
+		LB_TCP_CONNECTION_FAIL,         //31
+		LB_TCP_COMMUNICATION_FAIL,      //32
+		LB_REMOTE_ERROR,                //33
+		LB_SSL_DISABLED,                //34
+		LB_CURL_ERROR,                  //35
 };
+
+namespace pen_tcp{
+
+  static const size_t messageLen = 512;
+  
+  std::string trim(const std::string& str,
+		   const std::string& whitespace = " \t\n");
+}
 
 namespace LB{
 
@@ -375,7 +401,6 @@ namespace LB{
       std::this_thread::sleep_for(sleepTime);      
     }
   }
-
   
 #endif
   // ************************** MPI END ******************************* //
@@ -438,8 +463,20 @@ namespace LB{
       measures.reserve(200); //Reserve space for 200 measures
     }
 
-    inline size_t registers(){return measures.size();}
+    inline void setLastTime(const std::chrono::steady_clock::time_point t){
+      lastTime = t;
+    }
 
+    inline size_t registers() const {return measures.size();}
+
+    
+    inline LB::measure readMeasure() const {
+      return measures.back();
+    }
+    inline LB::measure readMeasure(const size_t index) const {
+      return measures[index];
+    }
+    
     float
     addMeasure(const std::chrono::steady_clock::time_point& actualTime,
 	       const unsigned long long nIter);
@@ -499,7 +536,17 @@ namespace LB{
       measures.clear();
     }
 
-    int printReport(FILE* fout) const;
+    int printReport(FILE* fout,
+		    const std::chrono::steady_clock::time_point globStart) const;
+
+    inline int printReport(FILE* fout) const{
+      return printReport(fout,init);
+    }
+    
+    int dump(FILE* fdump) const;
+    int load(FILE* fin,
+	     const std::chrono::steady_clock::time_point taskBegin);
+    
   };
 
   struct guessWorker : public worker{
@@ -608,10 +655,20 @@ namespace LB{
     bool MPIfinishReqFlag;
     //Create a flag for request send 
     bool MPIsent;
-	  
+    
 #endif
     // **************************** MPI ********************************* //
-	  
+
+    //External balance variables
+    bool ext_balance;
+    long int ext_iworker;
+
+    bool ext_http;
+    std::string baseURL;
+    std::string startURL;
+    std::string reportURL;
+    std::string finishURL;
+    
     inline void lockWorkers(){
       //Lock all workers
       for(std::mutex& mtx : locks)
@@ -624,7 +681,65 @@ namespace LB{
     }
 	  
     void clear();
-	  
+
+    int setIterationsTrusted(const unsigned long long nIter); 
+    
+    int parseAssigned(const std::string& response,
+		      unsigned long long& newAssign,
+		      int& errCode);
+
+// ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+
+    int httpGet(const std::string& url,
+		std::string& bodyResponse);
+    
+    int extStartHTTP(int& serverErr,
+		     const unsigned verbose,
+		     bool trusted);
+
+    int extReportHTTP(int& serverErr,
+		      const unsigned long long nIter,
+		      const std::chrono::steady_clock::time_point& rep_time,
+		      const unsigned verbose,
+		      bool trusted);
+
+    int extFinishHTTP(int& serverErr,
+		      const unsigned long long nIter,
+		      const std::chrono::steady_clock::time_point& rep_time,
+		      const unsigned verbose);
+#endif
+// **********************   HTTP END   **********************
+    
+    void extStartHandler(const unsigned retries = 5,
+			 std::chrono::seconds sleeptime = std::chrono::seconds(10),
+			 const unsigned verbose = 1,
+			 const bool trusted = true);
+    
+    void extReportHandler(const unsigned long long nIterDone,
+			  const std::chrono::steady_clock::time_point& rep_time,
+			  const std::chrono::seconds sleeptime = std::chrono::seconds(10),
+			  const unsigned verbose = 1,
+			  const bool trusted = true);
+
+    void extFinishHandler(const unsigned long long nIterDone,
+			  const std::chrono::steady_clock::time_point& rep_time,
+			  const std::chrono::seconds sleeptime = std::chrono::seconds(10),
+			  const unsigned verbose = 1);
+
+    unsigned long doneTrusted(){
+      //Return the registered done iterations
+
+      unsigned long long iterDone = 0;
+      unsigned iw = 0;
+      for(const LB::worker& taskWorker : workers){
+	//Add its prediction of iterations done
+	iterDone += taskWorker.done();
+	++iw;
+      }
+      return iterDone;
+    }
+    
   public:
     task() : iterations(0),
 	     minTimeCheck(300),
@@ -632,7 +747,8 @@ namespace LB{
 	     remainingTime(100000000000000),
 	     nworkers(0), started(false),
 	     finished(false), threshold(300),
-	     maxDeviation(0.1){
+	     maxDeviation(0.1),ext_balance(false),
+	     ext_iworker(-1),ext_http(false){
       
       fth = nullptr;
       // **************************** MPI ********************************* //
@@ -650,6 +766,14 @@ namespace LB{
       // **************************** MPI ********************************* //
     }
 
+    // ********************** HTTP SUPPORT **********************
+#ifdef _PEN_USE_LB_HTTP_
+    int extHTTPserver(const unsigned extern_iw,
+		      const char* url,
+		      const unsigned verbose);
+#endif
+    // **********************   HTTP END   **********************
+    
     inline void setCheckTime(const std::chrono::seconds::rep t){
       lockWorkers();
       minTimeCheck = t;
@@ -740,8 +864,13 @@ namespace LB{
     unsigned long long predDone(unsigned long long& donePred);
     unsigned long long done();
 	  
-    int setIterations(const unsigned long long nIter);
-
+    inline int setIterations(const unsigned long long nIter){
+      lockWorkers();
+      int ret = setIterationsTrusted(nIter);
+      unlockWorkers();
+      return ret;
+    }
+    
     int checkPoint(const unsigned verbose);
     
     void reset();    
@@ -767,7 +896,7 @@ namespace LB{
 		       const unsigned verbose);
     float receiveReportMPI(const unsigned inode,
 			  const unsigned verbose);
-    unsigned long long balanceMPI();
+    unsigned long long balanceMPI(const unsigned verbose);
 
     inline unsigned long long speedMPI(float& speedOut){
       unsigned long long totalIterDone = 0;
@@ -782,6 +911,16 @@ namespace LB{
       return totalIterDone;
     }
 
+    inline unsigned long long predDoneMPI(std::chrono::steady_clock::time_point actualTime){
+      
+      unsigned long long donePred = 0;
+      for(const LB::worker& worker : MPIworkers){
+	//Add its prediction of iterations done
+	donePred += worker.predDone(actualTime);
+      }
+      return donePred;
+    }
+    
     inline bool checkFinishMPI(const unsigned verbose = 1){
       //Check if rank 0 allows us to finish the task
       //Lock MPI because this function is not
@@ -908,5 +1047,230 @@ namespace LB{
       // ************************** MPI END ******************************* // 
     }
   };
+
+  class taskServer{
+
+  private:
+    //Total number ot iterations to done
+    unsigned long long iterations;
+    //Total number ot iterations done
+    unsigned long long remaining;
+    //Estimated remaining time 
+    unsigned long long remainingTime;    
+
+    //Init time is set at constructor call
+    std::chrono::steady_clock::time_point taskBegin;
+
+    //Vector of guess workers
+    std::vector<guessWorker> workers;
+    //Vector with workers init time points
+    std::vector<std::chrono::steady_clock::time_point> workerInits;
+    //Vector with workers resume time points
+    std::vector<std::chrono::steady_clock::time_point> workerResumes;
+    FILE* flog;
+
+    //Remaining time (in s) threshold to stop balancing
+    unsigned long long  threshold;
+
+    //Task started flag
+    bool started;
+    //Task finished flag
+    bool finished;
+    
+    void createError(const int prefix, const int errcode,
+		     const char* errmessage,
+		     char err[pen_tcp::messageLen],
+		     const unsigned verbose);
+    
+  public:
+
+    char ID[pen_tcp::messageLen];
+    
+    taskServer() : iterations(0), remaining(0),
+		   remainingTime(100000000000),
+		   flog(nullptr), threshold(300),
+		   started(true), finished(false){
+      taskBegin = std::chrono::steady_clock::now();
+      ID[0] = '\0'; //Default empty ID
+    }
+
+    inline unsigned long long readThreshold() const {return threshold;}
+
+    inline void setInit(){
+      taskBegin = std::chrono::steady_clock::now();
+    }
+
+    inline void setInit(const std::chrono::steady_clock::time_point t){
+      taskBegin = t;
+    }
+    
+    inline void moveInit(std::chrono::seconds elapsed){
+      taskBegin += elapsed;
+    }
+    
+    inline std::chrono::steady_clock::time_point workerTP(const size_t iw,
+							  const std::chrono::seconds elapsed) const {
+      return workerResumes[iw] + elapsed;
+    }
+    
+    inline void setID(const char* newID){
+      snprintf(ID,pen_tcp::messageLen,"%s",newID);
+    }
+
+    inline std::chrono::seconds::rep timeStamp(const std::chrono::steady_clock::time_point& time) const{
+      return std::chrono::duration_cast
+	<std::chrono::seconds>(time-taskBegin).count();
+    }
+    
+    inline std::chrono::seconds::rep timeStamp() const{
+      return timeStamp(std::chrono::steady_clock::now());
+    }
+
+    inline bool filterLog(const unsigned verboseLevel,
+			  const unsigned required) const {
+      if(flog != nullptr && verboseLevel > required )
+	return true;
+      return false;
+    }
+
+    inline unsigned long long ETA() const{return remainingTime;}
+
+    inline LB::measure readMeasure(const size_t iw) const{
+      if(iw >= workers.size())
+	return LB::measure(-1,-1.0);
+     return workers[iw].readMeasure();
+    }
+    
+    inline LB::measure readMeasure(const size_t iw, const size_t index) const{
+      if(iw >= workers.size())
+	return LB::measure(-1,-1.0);
+      if(index >= workers[iw].registers())
+	return LB::measure(-1,-1.0);	
+      return workers[iw].readMeasure(index);
+    }
+    
+    inline unsigned long long speed(float& globspeed,
+				    const std::chrono::steady_clock::time_point& now) const{
+      float totalSpeed = 0;
+      unsigned long long done = 0;
+      for(const LB::guessWorker& worker : workers){
+	if(worker.begins() && !worker.finishes()){
+	  //Check if the last report of this worker has been done recently.
+	  //If the server has not received reports from this worker
+	  //since "threshold", it will be considered as stopped
+	  //or crashed worker.
+	  unsigned long long telaps = worker.elapsed(now);
+	  if(telaps <= threshold)
+	    totalSpeed += worker.speed();
+	}
+	done += worker.done();
+      }
+      globspeed = totalSpeed;
+      return done;
+    }
+
+    inline unsigned long long predDone() const{
+      //Return the prediction of done iterations
+
+      //Get actual time
+      std::chrono::steady_clock::time_point actualTime =
+	std::chrono::steady_clock::now();
+
+      unsigned long long donePred = 0;
+      for(const LB::guessWorker& worker : workers){
+	//Add its prediction of iterations done
+	donePred += worker.predDone(actualTime);
+      }
+      return donePred;
+    }
+
+    inline void setThreshold(unsigned long long t){threshold = t;}
+
+    inline unsigned long long assigned(size_t iw){
+      if(iw < workers.size())
+	return workers[iw].assigned;
+      else
+	return 0ull;
+    }
+    
+    void clear();
+
+    int setLogFile(const char* logFileName,
+		   const unsigned verbose = 1);
+    
+    int init(const size_t nw,
+	     const unsigned long long nIter,
+	     const char* logFileName,
+	     const unsigned verbose = 1);
+
+    int workerStart(const size_t iw,
+		    const std::chrono::steady_clock::time_point& t,
+		    const unsigned verbose = 1);
+
+    int workerFinish(const size_t iw,
+		     const std::chrono::steady_clock::time_point& t,
+		     const unsigned long long nIter,
+		     const unsigned verbose = 1);
+    
+    int report(const size_t iw,
+	       const std::chrono::steady_clock::time_point& t,
+	       const unsigned long long nIter,
+	       const unsigned verbose = 1,
+	       const bool toBalance = true);
+    
+    void balance(const unsigned verbose = 1);
+
+    int load(FILE* fin,
+	     const unsigned verbose = 1);
+    
+    int dump(const char* saveFilename,
+	     const unsigned verbose = 1);
+
+    int receiveReport(const size_t iw,
+		      const unsigned long long nIter,
+		      const long int elapsed,
+		      unsigned long long& newAssign,
+		      const unsigned verbose = 1);
+
+    int receiveStart(const size_t iw,
+		     const long int elapsed,
+		     unsigned long long& newAssign,
+		     const unsigned verbose = 1);
+    
+    int receiveFinish(const size_t iw,
+		      const unsigned long long nIter,
+		      const long int elapsed,
+		      const unsigned verbose = 1);
+    
+    void monitor(const bool local,
+		 const unsigned short port,
+		 const char* CAfilename,
+		 const char* certFilename,
+		 const char* keyFilename,
+		 const char* dhFilename,
+		 const char* password,
+		 const unsigned verbose = 1);
+
+    int printReport(FILE* fout) const;
+    inline int printReport(const char* filename) const{
+
+      if(filename == nullptr)
+	return LB_ERROR_NULL_POINTER;
+
+      FILE* fout = nullptr;
+      fout = fopen(filename,"w");
+      if(fout == nullptr)
+	return LB_ERROR_UNABLE_TO_CREATE_FILE;
+
+      int ret = printReport(fout);
+      fclose(fout);
+      return ret;
+    }
+
+    ~taskServer();
+  };
+
+  std::string trim(const std::string& str,
+		   const std::string& whitespace = " \t\n");  
 }
 #endif
