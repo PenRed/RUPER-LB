@@ -40,6 +40,14 @@ option(WITH_MPI "Build with MPI " OFF)
 option(WITH_HTTP "Build with HTTP " OFF)
 #-----------------------------------------------------------------------------
 
+if(WITH_MPI)
+  add_definitions(-D_PEN_USE_MPI_=1) #enable MPI
+endif(WITH_MPI)
+
+if(WITH_HTTP)
+    add_definitions(-D_PEN_USE_LB_HTTP_=1) #enable HTTP
+endif(WITH_HTTP)
+
 #Add ruper-lb directory
 add_subdirectory(${PROJECT_SOURCE_DIR}/src)
  
